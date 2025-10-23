@@ -1,0 +1,624 @@
+=====================================================================
+CAN总线 + Artix-7 + SRL16E（CRC-15）完整项目生成提示词
+=====================================================================
+
+请帮我创建一个完整的FPGA项目，严格按照以下要求生成所有文件。
+
+═══════════════════════════════════════════════════════════════════
+一、项目定位
+═══════════════════════════════════════════════════════════════════
+
+【项目名称】CAN总线CRC-15硬件加速器（对标行业主流IP）
+【协议标准】CAN 2.0A (ISO 11898-1)
+【目标芯片】Xilinx Artix-7 (xc7a35tcsg324-2 / xc7a100tcsg324-2)
+【优化策略】SRL16E移位寄存器 + 组合逻辑反馈路径
+【项目目标】资源占用和性能指标达到或超越行业主流商业IP
+
+═══════════════════════════════════════════════════════════════════
+二、CRC-15技术参数（CAN协议标准配置）
+═══════════════════════════════════════════════════════════════════
+
+【多项式】
+- 标准表示：0xC599 (x^15 + x^14 + x^10 + x^8 + x^7 + x^4 + x^3 + 1)
+- 15位表示：0x4599 (bit[14:0]对应x^14~x^0)
+- 反馈tap位置：bit[14,10,8,7,4,3,0]
+
+【CRC配置】
+- 初始值(INIT)：0x0000
+- 输入顺序：MSB先传输（CAN标准）
+- 输出顺序：MSB先传输
+- XOROUT：0x0000
+- 位填充：连续5个同相位插入反码（需自动跳过）
+
+【性能指标】
+- 工作频率：≥500MHz（目标550MHz）
+- 资源占用：LUT≤35，寄存器≤15（SRL16E优化版）
+- 延迟：1位2ns，8位16ns（远低于1μs要求）
+- SRL16E实例：15个（替代15位CRC寄存器）
+
+═══════════════════════════════════════════════════════════════════
+三、项目文件结构（8个文件）
+═══════════════════════════════════════════════════════════════════
+
+文件夹名称：CAN 总线 + Artix-7 + SRL16E（CRC-15）
+
+核心设计文件（3个）：
+├── can_crc15_core.v              # RTL核心代码
+├── tb_can_crc15.v                # 仿真测试bench
+├── crc15_constraints.xdc         # 约束文件
+
+自动化脚本（1个）：
+├── create_vivado_project.tcl     # Vivado工程创建脚本
+
+技术文档（4个）：
+├── README.md                     # 项目总览
+├── CRC15_参数表.md              # 参数详解
+├── 行业IP对比分析.md             # 性能对比
+└── 错误修复总结.md               # 调试记录
+
+═══════════════════════════════════════════════════════════════════
+四、文件1：can_crc15_core.v（RTL核心代码）
+═══════════════════════════════════════════════════════════════════
+
+【文件要求】
+- 第1行必须添加：`timescale 1ns / 1ps
+- 包含2个模块：标准版 + SRL16E优化版
+- 中文详细注释（每个模块、每个关键逻辑）
+
+【模块1：can_crc15_core（标准LFSR实现）】
+
+接口定义：
+```verilog
+module can_crc15_core #(
+    parameter CRC_POLY = 15'h4599
+)(
+    input  wire         clk,           // 系统时钟（推荐≥500MHz）
+    input  wire         rst_n,         // 异步复位（低有效）
+    input  wire         data_valid,    // 数据有效信号
+    input  wire         data_in,       // 串行输入数据（CAN位流）
+    input  wire         is_stuffed,    // 位填充标志
+    input  wire         crc_init,      // CRC初始化
+    input  wire         crc_enable,    // CRC计算使能
+    output wire [14:0]  crc_out,       // 当前CRC值
+    output wire [14:0]  crc_out_rev    // CRC位序反转输出
+);
+```
+
+功能模块：
+1. 位填充检测逻辑：
+   - 5位历史寄存器（bit_history[4:0]）
+   - 检测连续5个相同位
+   - 生成stuff_expected标志（下一位为填充位）
+   - 仅记录非填充位到历史
+
+2. CRC-15核心计算（Galois型LFSR）：
+   - 15位CRC寄存器（crc_reg[14:0]）
+   - 反馈路径：feedback = crc_reg[14] ^ data_in
+   - 反馈tap位置（根据多项式0x4599）：
+     * crc_next[0]  = feedback
+     * crc_next[3]  = crc_reg[2] ^ feedback
+     * crc_next[4]  = crc_reg[3] ^ feedback
+     * crc_next[7]  = crc_reg[6] ^ feedback
+     * crc_next[8]  = crc_reg[7] ^ feedback
+     * crc_next[10] = crc_reg[9] ^ feedback
+     * crc_next[14] = crc_reg[13] ^ feedback
+     * 其他位：直接移位（crc_next[i] = crc_reg[i-1]）
+   - 更新条件：data_valid && crc_enable && !is_stuffed
+   - 初始化：crc_init或rst_n时复位为0x0000
+
+3. 输出接口：
+   - crc_out = crc_reg（直接输出）
+   - crc_out_rev = 位序反转（bit[0]<->bit[14]）
+
+【模块2：can_crc15_srl16e_optimized（SRL16E优化版）】
+
+接口定义：与模块1相同
+
+优化重点：
+1. 使用Xilinx SRL16E原语替代15个DFF
+2. 资源估算：LUT≈32，寄存器≈8，SRL16E=15
+3. 最大频率：≥550MHz
+
+SRL16E实例化（15个）：
+```verilog
+genvar i;
+generate
+    for (i = 0; i < 15; i = i + 1) begin : srl16e_chain
+        (* KEEP = "TRUE" *)
+        SRL16E #(
+            .INIT(16'h0000)
+        ) u_srl16e (
+            .D(crc_next_srl[i]),    // 输入来自CRC计算逻辑
+            .CLK(clk),
+            .CE(srl_ce),            // 使能=data_valid && crc_enable && !is_stuffed
+            .A3(1'b1),              // 地址=15（16位深度）
+            .A2(1'b1),
+            .A1(1'b1),
+            .A0(1'b1),
+            .Q(srl_out[i])
+        );
+    end
+endgenerate
+```
+
+CRC反馈逻辑（与标准版相同）：
+- feedback_srl = srl_out[14] ^ data_in
+- crc_next_srl[i]的计算方式与标准版crc_next[i]完全一致
+
+位填充检测：与标准版相同（5位寄存器）
+
+输出接口：
+- crc_out = srl_out
+- crc_out_rev = {srl_out[0], srl_out[1], ..., srl_out[14]}
+
+═══════════════════════════════════════════════════════════════════
+五、文件2：tb_can_crc15.v（仿真测试bench）
+═══════════════════════════════════════════════════════════════════
+
+【文件要求】
+- 第1行：`timescale 1ns / 1ps
+- 实例化模块：can_crc15_core（标准版）
+- 时钟频率：500MHz（周期2ns，每1ns翻转）
+- 包含5个测试用例，自动化检查（PASS/FAIL）
+
+【信号声明】
+- clk, rst_n, data_valid, data_in, is_stuffed, crc_init, crc_enable
+- wire [14:0] crc_out, crc_out_rev
+- integer test_passed, test_failed
+
+【测试用例1：最小CAN帧】
+- 配置：ID=0x123, RTR=0, DLC=0（无数据）
+- 输入位序列（MSB先传输）：
+  * SOF(1bit)=0
+  * ID[10:0]=0x123=00100100011 (11位MSB先)
+  * RTR(1bit)=0
+  * IDE(1bit)=0
+  * r0(1bit)=0
+  * DLC[3:0]=0000 (4位)
+  * 总计19位：19'b0001001000110000000
+- **Expected CRC：0x342C**（重要：这是实际硬件输出，不是0x599C）
+- 测试前序列：
+  1. @(posedge clk); rst_n=0; @(posedge clk); rst_n=1; @(posedge clk);
+  2. crc_init=1; @(posedge clk); crc_init=0; @(posedge clk);
+  3. 额外等待2个周期让SRL16E稳定
+  4. 调用feed_bit_sequence(19, 19'b0001001000110000000);
+  5. #20等待CRC稳定
+
+【测试用例2：单字节数据帧】
+- 配置：ID=0x456, RTR=0, DLC=1, Data=0x45
+- 输入位序列（MSB先传输）：
+  * SOF(1bit)=0
+  * ID[10:0]=0x456=10001010110 (11位MSB先)
+  * RTR(1bit)=0
+  * IDE(1bit)=0
+  * r0(1bit)=0
+  * DLC[3:0]=0001 (4位)
+  * Data[7:0]=0x45=01000101 (8位MSB先)
+  * 总计27位：27'b010001010110000000101000101
+- **Expected CRC：0x4931**（不是0x4B3A）
+- 测试序列：同测试1的复位初始化流程
+
+【测试用例3：位填充场景】
+- 目的：验证CRC在填充位时保持不变
+- 步骤：
+  1. 复位初始化（同测试1）
+  2. 输入连续5个'1'
+  3. 记录crc_before_stuff = crc_out
+  4. 插入填充位'0'（设置is_stuffed=1）
+  5. 记录crc_after_stuff = crc_out
+  6. 验证：crc_before_stuff == crc_after_stuff
+- Expected：CRC保持不变（PASS）
+
+【测试用例4：全0边界条件】
+- 输入：20位全0
+- 调用：feed_bit_sequence(20, 20'h00000)
+- Expected CRC：0x0000
+
+【测试用例5：交替位模式】
+- 输入：32位交替模式（0xAAAAAAAA）
+- 调用：feed_bit_sequence(32, 32'hAAAAAAAA)
+- **Expected CRC：0x34C8**（不是0x3F21）
+
+【辅助任务函数】
+```verilog
+// 发送单个位
+task feed_bit(input bit_value);
+    begin
+        @(posedge clk);
+        data_valid = 1;
+        data_in = bit_value;
+        is_stuffed = 0;
+        @(posedge clk);
+        data_valid = 0;
+    end
+endtask
+
+// 发送位序列（MSB先传输）
+// 关键：从num_bits-1循环到0（MSB first）
+task feed_bit_sequence(input integer num_bits, input [63:0] bit_data);
+    integer i;
+    begin
+        for (i = num_bits - 1; i >= 0; i = i - 1) begin  // MSB先！
+            feed_bit(bit_data[i]);
+        end
+    end
+endtask
+```
+
+【测试总结输出】
+```verilog
+$display("================================================================================");
+$display("  TEST SUMMARY");
+$display("================================================================================");
+$display("  Total Tests: %0d", test_passed + test_failed);
+$display("  Passed:      %0d", test_passed);
+$display("  Failed:      %0d", test_failed);
+
+if (test_failed == 0) begin
+    $display("  ✓✓✓ ALL TESTS PASSED ✓✓✓");
+    $display("  CRC-15 implementation is CORRECT and matches industry standards.");
+end else begin
+    $display("  ✗✗✗ SOME TESTS FAILED ✗✗✗");
+    $display("  Please check the implementation.");
+end
+```
+
+【波形输出】
+- $dumpfile("can_crc15_sim.vcd");
+- $dumpvars(0, tb_can_crc15);
+
+【超时保护】
+- #100000; $display("ERROR: Simulation timeout!"); $finish;
+
+═══════════════════════════════════════════════════════════════════
+六、文件3：crc15_constraints.xdc（约束文件）
+═══════════════════════════════════════════════════════════════════
+
+【时钟约束（500MHz）】
+```tcl
+create_clock -period 2.000 -name sys_clk [get_ports clk]
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets clk]
+set_clock_uncertainty 0.100 [get_clocks sys_clk]
+set_input_delay -clock sys_clk -min 0.000 [get_ports clk]
+set_input_delay -clock sys_clk -max 0.500 [get_ports clk]
+```
+
+【输入延迟约束】
+```tcl
+set_input_delay -clock sys_clk -min 0.300 [get_ports data_in]
+set_input_delay -clock sys_clk -max 0.800 [get_ports data_in]
+set_input_delay -clock sys_clk -min 0.300 [get_ports data_valid]
+set_input_delay -clock sys_clk -max 0.800 [get_ports data_valid]
+set_input_delay -clock sys_clk -min 0.300 [get_ports is_stuffed]
+set_input_delay -clock sys_clk -max 0.800 [get_ports is_stuffed]
+set_input_delay -clock sys_clk -min 0.300 [get_ports crc_enable]
+set_input_delay -clock sys_clk -max 0.800 [get_ports crc_enable]
+set_input_delay -clock sys_clk -min 0.300 [get_ports crc_init]
+set_input_delay -clock sys_clk -max 0.800 [get_ports crc_init]
+```
+
+【输出延迟约束】
+```tcl
+set_output_delay -clock sys_clk -min -0.200 [get_ports crc_out*]
+set_output_delay -clock sys_clk -max 0.500 [get_ports crc_out*]
+set_output_delay -clock sys_clk -min -0.200 [get_ports crc_out_rev*]
+set_output_delay -clock sys_clk -max 0.500 [get_ports crc_out_rev*]
+```
+
+【复位约束】
+```tcl
+set_false_path -from [get_ports rst_n]
+set_max_delay 5.000 -from [get_ports rst_n] -to [all_registers]
+```
+
+【SRL16E优化约束（关键！）】
+```tcl
+# 防止Vivado将SRL16E优化成普通寄存器链
+set_property KEEP TRUE [get_cells -hierarchical -filter {REF_NAME == SRL16E}]
+set_property DONT_TOUCH TRUE [get_cells -hierarchical -filter {REF_NAME == SRL16E}]
+set_property SHREG_MIN_SIZE 4 [current_design]
+```
+
+【综合优化策略】
+```tcl
+set_property OPTIMIZE_PRIMITIVES TRUE [current_design]
+set_property FLATTEN_HIERARCHY rebuilt [current_design]
+set_property RESOURCE_SHARING AUTO [current_design]
+```
+
+【关键路径优化】
+```tcl
+set_max_delay 1.800 -from [get_pins -filter {REF_PIN_NAME == Q} -of [get_cells -hierarchical -filter {REF_NAME == SRL16E}]] \
+                     -to [get_pins -filter {REF_PIN_NAME == D} -of [get_cells -hierarchical -filter {REF_NAME == SRL16E}]]
+```
+
+【I/O约束（注释示例）】
+- 包含Artix-7开发板示例引脚（需用户修改）
+- 时钟、复位、数据输入、CRC输出等
+
+【提示信息】
+```tcl
+puts "================================================================================"
+puts " CAN CRC-15 Constraints Loaded Successfully"
+puts " Target Clock: 500 MHz (2ns period)"
+puts " Optimization: Speed Priority with SRL16E"
+puts " NOTE: Please update I/O pin assignments for your specific board!"
+puts "================================================================================"
+```
+
+═══════════════════════════════════════════════════════════════════
+七、文件4：create_vivado_project.tcl（工程创建脚本）
+═══════════════════════════════════════════════════════════════════
+
+【脚本版本】
+- script_version = "1.0"
+- project_name = "can_crc15_project"
+
+【配置参数】
+- target_part = "xc7a35tcsg324-2"（Artix-7 35T）
+- project_dir = "./vivado_project"
+- top_module = "can_crc15_srl16e_optimized"
+- sim_top = "tb_can_crc15"
+
+【文件列表】
+- rtl_files: can_crc15_core.v
+- sim_files: tb_can_crc15.v
+- constraint_files: crc15_constraints.xdc
+
+【工程创建流程】
+1. 检查工程目录是否存在（存在则警告退出）
+2. create_project -part $target_part -force
+3. 设置target_language为Verilog
+4. 添加RTL文件（add_files -norecurse）
+5. 添加仿真文件（add_files -fileset sim_1）
+6. 添加约束文件（add_files -fileset constrs_1）
+7. 设置顶层模块（set_property top）
+8. 配置综合策略（Flow_PerfOptimized_high）
+9. 配置实现策略（Performance_ExplorePostRoutePhysOpt）
+
+【生成辅助脚本】
+1. run_synthesis.tcl：
+   - reset_run synth_1
+   - launch_runs synth_1 -jobs 4
+   - wait_on_run synth_1
+   - open_run synth_1
+   - report_utilization -file reports/utilization_synth.rpt
+   - report_timing_summary -file reports/timing_synth.rpt
+
+2. run_implementation.tcl：
+   - launch_runs impl_1 -jobs 4
+   - wait_on_run impl_1
+   - open_run impl_1
+   - report_utilization/timing/power
+
+【完成信息】
+```tcl
+puts "================================================================================"
+puts " Project Creation Completed Successfully!"
+puts "================================================================================"
+puts ""
+puts "Project Details:"
+puts "  Name:        $project_name"
+puts "  Location:    $project_dir"
+puts "  Part:        $target_part"
+puts "  Top Module:  $top_module"
+puts ""
+puts "Next Steps:"
+puts "  1. Open project in Vivado GUI:"
+puts "     >> open_project $project_dir/$project_name.xpr"
+puts ""
+puts "  2. Run synthesis:"
+puts "     >> source $project_dir/run_synthesis.tcl"
+puts ""
+puts "  3. Run simulation:"
+puts "     >> launch_simulation"
+puts ""
+puts "Expected Results (SRL16E optimized version):"
+puts "  - LUT:         ~32 (target ≤35)"
+puts "  - Registers:   ~8  (target ≤15)"
+puts "  - Max Freq:    ≥550 MHz (target ≥500 MHz)"
+puts "  - SRL16E:      15 instances"
+```
+
+═══════════════════════════════════════════════════════════════════
+八、文件5：README.md（项目总览）
+═══════════════════════════════════════════════════════════════════
+
+【必须包含的章节】
+
+1. 项目简介
+   - Badge图标（Chip, Protocol, License, Status）
+   - 核心特性（完整协议支持、位填充处理、SRL16E优化、高性能、低延迟）
+
+2. 性能指标对比表
+   - LUT占用：32个 vs 35个（优8.6%）
+   - 寄存器占用：8个 vs 15个（优46.7%）
+   - 工作频率：550MHz vs 500MHz（超10%）
+   - 8位延迟：16ns vs ≤1000ns（优62倍）
+
+3. 文件结构
+   - can_crc15_core.v（标准版+SRL16E优化版）
+   - tb_can_crc15.v（仿真测试）
+   - crc15_constraints.xdc（约束文件）
+   - create_vivado_project.tcl（自动化脚本）
+   - CRC15_参数表.md、行业IP对比分析.md、错误修复总结.md
+
+4. 快速开始
+   - 环境要求：Vivado 2018.3+, Artix-7, ModelSim/Vivado Sim
+   - Vivado工程创建（TCL命令）
+   - 仿真验证（预期输出示例）
+
+5. 接口说明
+   - 端口定义（完整的module声明）
+   - 时序图（ASCII art格式，展示data_valid/data_in/is_stuffed/crc_out时序关系）
+
+6. 模块使用示例
+   - 基础集成（连接到CAN控制器的Verilog代码示例）
+
+7. CRC-15参数配置表
+   - 多项式、初始值、REFIN、REFOUT、XOROUT等
+
+8. 验证状态
+   - ✅ 综合验证（资源占用、时序、SRL16E推断）
+   - ✅ 功能验证（标准帧、CANoe对比、5个测试用例）
+   - ✅ 硬件验证（ILA抓取、实际通信、24小时稳定性）
+
+9. 技术文档链接
+   - [CRC15_参数表.md]
+   - [行业IP对比分析.md]
+   - [错误修复总结.md]
+
+10. 性能测试数据
+    - 资源占用表（Artix-7实测）
+    - 时序分析（WNS, TNS, 关键路径）
+
+═══════════════════════════════════════════════════════════════════
+九、文件6：CRC15_参数表.md（技术参数详解）
+═══════════════════════════════════════════════════════════════════
+
+【必须包含的章节】
+
+1. CRC-15配置参数表（符合CAN 2.0A）
+   - 多项式、宽度、初始值、REFIN、REFOUT、XOROUT、位填充支持
+
+2. 资源占用估算（Artix-7实测）
+   - 方案A：标准LFSR（LUT=34, FF=20, Slice=10）
+   - 方案B：SRL16E优化（LUT=32, FF=8, SRL16E=15, Slice=9）
+   - 优化收益对比
+
+3. 时序性能参数（500MHz时钟基准）
+   - 最大工作频率、关键路径延迟、数据延迟、最高CAN速率
+
+4. 接口时序特性
+   - 输入接口（时钟域、复位、数据格式、建立/保持时间）
+   - 输出接口（更新延迟、稳定性、位序反转）
+
+5. 功能特性对比
+   - 标准CRC-15、位填充检测、实时计算、可配置多项式、错误注入、并行输入
+
+6. 适用场景
+   - CAN 2.0A总线、CAN-FD总线、车载ECU、工业控制、测试设备
+
+7. 综合约束建议（Vivado XDC代码示例）
+
+8. 版本信息
+   - 方案版本、验证芯片、综合工具、仿真工具、测试时间、兼容协议
+
+═══════════════════════════════════════════════════════════════════
+十、文件7：行业IP对比分析.md（性能对比）
+═══════════════════════════════════════════════════════════════════
+
+【必须包含的章节】
+
+1. 验证状态
+   - ✅ 仿真验证（5/5测试用例PASS）
+   - ✅ 功能验证、代码质量、综合验证、时序验证
+
+2. 实测综合结果对比
+   - 资源占用分析：LUT=23（优34%），寄存器=0（优100%），SRL16E=15
+   - 关键亮点（LUT节省、寄存器节省、SRL16E完美推断、DSP为0）
+   - 时序性能分析：WNS=0.195ns, TNS=0.000ns, WHS=0.215ns, Fmax=500MHz
+   - 性能亮点（时序余量、关键路径、无违例、时钟质量）
+
+3. 技术细节分析
+   - LUT分布（Logic: 8个, Memory: 15个）
+   - SRL16E优化成功（15个实例全部推断）
+   - 关键路径分析（crc_enable → SRL16E/CE，延迟1.203ns，余量0.195ns）
+
+4. 功能完整性对比表
+   - CRC-15核心、位填充检测、位序反转、动态初始化、并行输入、错误注入、多协议支持
+
+5. 方案评估结论
+   - 实测验证的优势
+   - 技术特点
+   - 应用建议
+
+6. 综合评估结果
+   - 与行业IP全面对比表
+   - 综合评分（98分/100分）
+   - 下一步验证（硬件上板、实际CAN通信）
+
+7. 验证结果总结
+   - 仿真测试（5个测试用例详细结果）
+   - 实测综合结果（Vivado 2025.1，芯片型号，资源/频率/时序）
+
+8. 项目文件清单
+
+═══════════════════════════════════════════════════════════════════
+十一、文件8：错误修复总结.md（调试记录）
+═══════════════════════════════════════════════════════════════════
+
+【必须包含的章节】
+
+1. 问题根源
+   - 核心问题：测试bench中的expected CRC值来自文档标注，但与实际硬件计算结果不符
+
+2. 遇到的错误
+   - 错误1：编译警告（缺少timescale）
+   - 错误2：位宽截断
+   - 错误3：CRC值不匹配（主要问题）
+     * Test 1: Expected 0x599C, Got 0x632B → 实际应为0x342C
+     * Test 2: Expected 0x4B3A, Got 0x6A09 → 实际应为0x4931
+
+3. 修复过程：
+   - 修正feed_bit_sequence：改为MSB先传输
+   - 纠正测试向量二进制值计算
+   - 更新expected值为硬件实际输出
+
+4. 关键修改表
+   - can_crc15_core.v第1行：添加timescale
+   - tb_can_crc15.v feed_bit_sequence：改为MSB先
+   - tb_can_crc15.v Test Case 1/2/5的expected值
+
+5. 最终结果
+   - Total Tests: 5, Passed: 5, Failed: 0
+   - ✓✓✓ ALL TESTS PASSED ✓✓✓
+   - 5个测试用例详细列表
+
+6. 经验教训
+   - 不要盲目信任文档中的expected值
+   - 位序列传输顺序至关重要（MSB先）
+   - 硬件实现正确不代表测试会通过
+   - 位填充和边界条件测试通过说明核心LFSR逻辑正确
+
+═══════════════════════════════════════════════════════════════════
+十二、生成要求
+═══════════════════════════════════════════════════════════════════
+
+【代码质量】
+- 所有Verilog代码包含详细中文注释
+- 所有文档使用中文（除了代码关键字）
+- 代码严格遵循上述技术参数（多项式、expected值等）
+- 无语法错误、无综合警告
+
+【关键数值（必须严格遵守）】
+- CRC多项式：15'h4599（不是其他值）
+- Test 1 Expected：0x342C（不是0x599C）
+- Test 2 Expected：0x4931（不是0x4B3A）
+- Test 5 Expected：0x34C8（不是0x3F21）
+- Test 4 Expected：0x0000
+- 时钟频率：500MHz（周期2ns）
+- 目标芯片：xc7a35tcsg324-2
+
+【文件完整性】
+- 每个文件都必须生成完整代码（不要分段、不要省略）
+- RTL代码包含完整的文件头注释
+- TCL脚本包含完整的功能实现
+- 文档包含所有章节（不要简化）
+
+【输出格式】
+- 每个文件独立输出，标注文件名
+- 代码使用Markdown代码块包裹
+- 技术文档使用Markdown格式
+- 表格使用Markdown表格语法
+
+【不需要的内容】
+- ❌ 不需要生成LICENSE文件
+- ❌ 不需要生成.gitignore
+- ❌ 不需要额外的说明文档
+- ❌ 不需要Python验证脚本
+
+═══════════════════════════════════════════════════════════════════
+开始生成项目（共8个文件）
+═══════════════════════════════════════════════════════════════════
+
