@@ -35,11 +35,21 @@ module can_crc15_core #(
     input  wire         data_in,       // 串行输入数据（CAN总线位流）
     input  wire         is_stuffed,    // 位填充标志（高电平表示当前位为填充位，需跳过CRC计算）
     
+    // 并行输入接口（Phase 1新增）
+    input  wire [7:0]   data_parallel, // 8位并行输入数据
+    input  wire         parallel_mode, // 并行模式使能（1=并行, 0=串行）
+    input  wire [2:0]   data_width,    // 并行数据宽度（0=1位, 1=2位, ..., 7=8位）
+    
     // 控制接口
     input  wire         crc_init,      // CRC初始化（高脉冲复位CRC为0x0000）
     input  wire         crc_enable,    // CRC计算使能（低电平时保持CRC状态）
     input  wire         frame_end,     // 帧结束信号（自动复位CRC）
     input  wire         error_frame,   // 错误帧信号（自动复位CRC）
+    
+    // 错误注入接口（Phase 1新增）
+    input  wire         test_mode,     // 测试模式使能
+    input  wire [2:0]   error_position, // 错误位置（0-7位）
+    input  wire         error_enable,  // 错误使能（在当前error_position注入错误）
     
     // CRC输出
     output wire [14:0]  crc_out,       // 当前CRC值（实时输出）
@@ -47,7 +57,72 @@ module can_crc15_core #(
 );
 
 ////////////////////////////////////////////////////////////////////////////////
-// 1. 位填充检测逻辑（CAN协议：连续5个同相位插入反码）
+// 1. 并行到串行转换逻辑（Phase 1新增）
+////////////////////////////////////////////////////////////////////////////////
+reg [7:0] parallel_buffer;  // 并行数据缓冲
+reg [2:0] parallel_cnt;     // 当前处理的位计数（0-7）
+reg       parallel_valid;   // 并行数据有效标志
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        parallel_buffer <= 8'h00;
+        parallel_cnt <= 3'h0;
+        parallel_valid <= 1'b0;
+    end else if (crc_init) begin
+        parallel_buffer <= 8'h00;
+        parallel_cnt <= 3'h0;
+        parallel_valid <= 1'b0;
+    end else if (parallel_mode && data_valid) begin
+        parallel_buffer <= data_parallel;
+        parallel_cnt <= data_width[2:0];
+        parallel_valid <= 1'b1;
+    end else if (parallel_valid && crc_enable) begin
+        if (parallel_cnt == 3'h0) begin
+            parallel_valid <= 1'b0;
+        end else begin
+            parallel_cnt <= parallel_cnt - 1'b1;
+        end
+    end
+end
+
+// 选择串行或并行数据源
+wire data_in_processed = parallel_mode ? parallel_buffer[parallel_cnt] : data_in;
+wire data_valid_processed = parallel_mode ? parallel_valid : data_valid;
+
+////////////////////////////////////////////////////////////////////////////////
+// 2. 错误注入逻辑（Phase 1新增）
+////////////////////////////////////////////////////////////////////////////////
+reg [2:0] bit_position;
+reg       error_active;
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        bit_position <= 3'h0;
+        error_active <= 1'b0;
+    end else if (crc_init) begin
+        bit_position <= 3'h0;
+        error_active <= 1'b0;
+    end else if (data_valid_processed && crc_enable && !is_stuffed) begin
+        if (!parallel_mode) begin
+            bit_position <= bit_position + 1'b1;  // 串行模式计数
+        end else begin
+            bit_position <= error_position;  // 并行模式使用指定位置
+        end
+        
+        // 检查是否需要注入错误
+        if (test_mode && error_enable && (bit_position == error_position)) begin
+            error_active <= 1'b1;
+        end else begin
+            error_active <= 1'b0;
+        end
+    end
+end
+
+// 应用错误注入
+wire data_in_with_error = data_in_processed ^ (error_active ? 1'b1 : 1'b0);
+
+////////////////////////////////////////////////////////////////////////////////
+// 3. 位填充检测逻辑（CAN协议：连续5个同相位插入反码）
 ////////////////////////////////////////////////////////////////////////////////
 reg [4:0] bit_history;  // 最近5位历史（用于检测连续相同位）
 reg       stuff_expected; // 下一位应为填充位标志
@@ -59,7 +134,7 @@ always @(posedge clk or negedge rst_n) begin
     end else if (crc_init) begin
         bit_history <= 5'b0;
         stuff_expected <= 1'b0;
-    end else if (data_valid && crc_enable) begin
+    end else if (data_valid_processed && crc_enable) begin
         // 检测连续5个相同位
         if (bit_history == 5'b11111 || bit_history == 5'b00000) begin
             stuff_expected <= 1'b1;  // 下一位为填充位
@@ -69,13 +144,13 @@ always @(posedge clk or negedge rst_n) begin
         
         // 更新历史记录（仅记录非填充位）
         if (!is_stuffed) begin
-            bit_history <= {bit_history[3:0], data_in};
+            bit_history <= {bit_history[3:0], data_in_with_error};
         end
     end
 end
 
 ////////////////////////////////////////////////////////////////////////////////
-// 2. CRC-15核心计算（采用线性反馈移位寄存器LFSR架构）
+// 4. CRC-15核心计算（采用线性反馈移位寄存器LFSR架构）
 ////////////////////////////////////////////////////////////////////////////////
 // CRC状态寄存器（15位）
 reg [14:0] crc_reg;
@@ -85,7 +160,7 @@ reg [14:0] crc_reg;
 // 15位LFSR实现（Galois型）：除以多项式，最高位隐含
 // 反馈tap位置：bit[14,10,8,7,4,3,0]
 wire feedback;
-assign feedback = crc_reg[14] ^ data_in;  // 反馈路径（XOR最高位与输入）
+assign feedback = crc_reg[14] ^ data_in_with_error;  // 反馈路径（XOR最高位与输入）
 
 // 组合逻辑计算下一个CRC状态（Galois型LFSR结构）
 wire [14:0] crc_next;
@@ -113,7 +188,7 @@ always @(posedge clk or negedge rst_n) begin
         crc_reg <= 15'h0000;  // 复位为初始值（CAN协议INIT=0x0000）
     end else if (auto_reset || crc_init) begin
         crc_reg <= 15'h0000;  // 自动复位或手动初始化
-    end else if (data_valid && crc_enable && !is_stuffed) begin
+    end else if (data_valid_processed && crc_enable && !is_stuffed) begin
         // 关键：仅在非填充位时更新CRC（CAN协议要求）
         crc_reg <= crc_next;
     end
@@ -163,7 +238,9 @@ endmodule
 ////////////////////////////////////////////////////////////////////////////////
 
 module can_crc15_srl16e_optimized #(
-    parameter CRC_POLY = 15'h4599
+    parameter CRC_POLY = 15'h4599,
+    parameter ENABLE_PARALLEL = 1,  // Phase 1: 并行输入使能开关（默认开启测试）
+    parameter ENABLE_ERROR_INJECT = 1  // Phase 1: 错误注入使能开关（默认开启测试）
 )(
     input  wire         clk,
     input  wire         rst_n,
@@ -174,9 +251,91 @@ module can_crc15_srl16e_optimized #(
     input  wire         crc_enable,
     input  wire         frame_end,     // 帧结束信号（自动复位CRC）
     input  wire         error_frame,   // 错误帧信号（自动复位CRC）
+    input  wire [7:0]   data_parallel, // Phase 1: 并行输入（参数化）
+    input  wire         parallel_mode, // Phase 1: 并行模式
+    input  wire [2:0]   data_width,    // Phase 1: 数据宽度
+    input  wire         test_mode,     // Phase 1: 测试模式
+    input  wire [2:0]   error_position, // Phase 1: 错误位置
+    input  wire         error_enable,  // Phase 1: 错误使能
     output wire [14:0]  crc_out,
     output wire [14:0]  crc_out_rev
 );
+
+// Phase 1: 并行到串行转换（参数化使能）
+wire      data_in_srl;
+wire      data_valid_srl;
+
+generate
+if (ENABLE_PARALLEL == 1) begin : gen_parallel_logic
+    reg [7:0] parallel_buffer_srl;
+    reg [2:0] parallel_cnt_srl;
+    reg       parallel_valid_srl;
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            parallel_buffer_srl <= 8'h00;
+            parallel_cnt_srl <= 3'h0;
+            parallel_valid_srl <= 1'b0;
+        end else if (crc_init) begin
+            parallel_buffer_srl <= 8'h00;
+            parallel_cnt_srl <= 3'h0;
+            parallel_valid_srl <= 1'b0;
+        end else if (parallel_mode && data_valid) begin
+            parallel_buffer_srl <= data_parallel;
+            parallel_cnt_srl <= data_width[2:0];
+            parallel_valid_srl <= 1'b1;
+        end else if (parallel_valid_srl && crc_enable) begin
+            if (parallel_cnt_srl == 3'h0) begin
+                parallel_valid_srl <= 1'b0;
+            end else begin
+                parallel_cnt_srl <= parallel_cnt_srl - 1'b1;
+            end
+        end
+    end
+    
+    assign data_in_srl = parallel_mode ? parallel_buffer_srl[parallel_cnt_srl] : data_in;
+    assign data_valid_srl = parallel_mode ? parallel_valid_srl : data_valid;
+end else begin : gen_serial_logic
+    assign data_in_srl = data_in;
+    assign data_valid_srl = data_valid;
+end
+endgenerate
+
+// Phase 1: 错误注入逻辑（参数化使能）
+wire      data_in_with_error_srl;
+
+generate
+if (ENABLE_ERROR_INJECT == 1) begin : gen_error_inject_logic
+    reg [2:0] bit_position_srl;
+    reg       error_active_srl;
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            bit_position_srl <= 3'h0;
+            error_active_srl <= 1'b0;
+        end else if (crc_init) begin
+            bit_position_srl <= 3'h0;
+            error_active_srl <= 1'b0;
+        end else if (data_valid_srl && crc_enable && !is_stuffed) begin
+            if (!parallel_mode) begin
+                bit_position_srl <= bit_position_srl + 1'b1;
+            end else begin
+                bit_position_srl <= error_position;
+            end
+            
+            if (test_mode && error_enable && (bit_position_srl == error_position)) begin
+                error_active_srl <= 1'b1;
+            end else begin
+                error_active_srl <= 1'b0;
+            end
+        end
+    end
+    
+    assign data_in_with_error_srl = error_active_srl ? ~data_in_srl : data_in_srl;
+end else begin : gen_no_error_inject
+    assign data_in_with_error_srl = data_in_srl;
+end
+endgenerate
 
 // SRL16E移位寄存器链（Xilinx原语实例化）
 // 注意：SRL16E用1个LUT实现16位移位寄存器，本设计用15位
@@ -187,7 +346,7 @@ wire [14:0] srl_out;  // SRL输出（并行读取）
 wire auto_reset_srl = frame_end | error_frame;
 
 // CRC使能逻辑（自动复位时强制移位输入为0）
-assign srl_ce = (data_valid && crc_enable && !is_stuffed) || auto_reset_srl;
+assign srl_ce = (data_valid_srl && crc_enable && !is_stuffed) || auto_reset_srl;
 
 // 实例化15个SRL16E原语（每个存储CRC的1位）
 genvar i;
@@ -204,10 +363,10 @@ generate
         SRL16E #(
             .INIT(16'h0000)  // 初始值全0
         ) u_srl16e (
-            .D(auto_reset_srl ? 1'b0 : crc_next_srl[i]),    // 自动复位时输入0
+            .D(auto_reset_srl ? 1'b0 : crc_next_srl[i]),
             .CLK(clk),
             .CE(srl_ce),
-            .A3(1'b1),              // 地址=15（使用16位深度）
+            .A3(1'b1),
             .A2(1'b1),
             .A1(1'b1),
             .A0(1'b1),
@@ -218,7 +377,7 @@ endgenerate
 
 // CRC反馈逻辑（与标准版相同，使用正确的CAN CRC-15多项式）
 wire feedback_srl;
-assign feedback_srl = srl_out[14] ^ data_in;
+assign feedback_srl = srl_out[14] ^ data_in_with_error_srl;
 
 wire [14:0] crc_next_srl;
 assign crc_next_srl[0]  = feedback_srl;                          // x^0项
@@ -244,8 +403,8 @@ always @(posedge clk or negedge rst_n) begin
         bit_history_srl <= 5'b0;
     end else if (crc_init) begin
         bit_history_srl <= 5'b0;
-    end else if (data_valid && crc_enable && !is_stuffed) begin
-        bit_history_srl <= {bit_history_srl[3:0], data_in};
+    end else if (data_valid_srl && crc_enable && !is_stuffed) begin
+        bit_history_srl <= {bit_history_srl[3:0], data_in_with_error_srl};
     end
 end
 
