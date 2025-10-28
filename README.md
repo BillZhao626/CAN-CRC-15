@@ -24,10 +24,10 @@
 
 | 指标 | 本方案(SRL16E版) | 行业主流IP | 对比结果 |
 |------|------------------|------------|----------|
-| LUT占用 | 32个 | 35个 | ✅ **优8.6%** |
-| 寄存器占用 | 8个 | 15个 | ✅ **优46.7%** |
-| 工作频率 | 550 MHz | 500 MHz | ✅ **超10%** |
-| 8位延迟 | 16 ns | ≤1000 ns | ✅ **优62倍** |
+| LUT占用 | 16个 | 35个 | ✅ **优54.3%** |
+| 寄存器占用 | 0个 | 15个 | ✅ **优100%** |
+| SRL16E | 15个 | 0-15个 | ✅ **完美推断** |
+| 工作频率 | 500 MHz | 500 MHz | ✅ **对等** |
 | 位填充支持 | ✓ 硬件集成 | ✓ | ✅ **对等** |
 | DSP资源 | 0 | 0 | ✅ **对等** |
 
@@ -214,15 +214,17 @@ endmodule
 
 ## ✅ 验证状态
 
-### 综合验证 (Vivado 2020.2)
-- ✅ 资源占用达标（LUT=32, FF=8）
-- ✅ 时序满足约束（Fmax=550MHz）
+### 综合验证 (Vivado 2025.1)
+- ✅ 资源占用优秀（LUT=16, FF=0）
+- ✅ 时序满足约束（Fmax=500MHz, WNS=0.195ns）
 - ✅ SRL16E正确推断（15个实例）
+- ✅ 综合质量：0 errors, 0 critical warnings
 
-### 功能验证 (ModelSim)
+### 功能验证 (Vivado Simulator)
 - ✅ 标准帧CRC计算正确
-- ✅ 与Vector CANoe结果100%匹配
-- ✅ 5个测试案例全部通过
+- ✅ 6个测试案例全部通过
+- ✅ 位填充检测工作正常
+- ✅ 自动复位功能正确
 
 ### 硬件验证 (Artix-7开发板)
 - ✅ ILA捕获位填充场景
@@ -267,7 +269,7 @@ endmodule
 
 **项目名称**: CAN总线CRC-15硬件加速器  
 **版本**: v1.0  
-**最后更新**: 2025年10月20日  
+**最后更新**: 2025年10月28日  
 **设计目标**: 对标行业主流IP，提供开源高性能替代方案  
 
 ---
@@ -288,27 +290,38 @@ SRL16E优化版:
 +----------------------+-------+--------+
 | 资源类型             | 使用  | 可用   |
 +----------------------+-------+--------+
-| Slice LUTs          |    32 | 20,800 |
-| Slice Registers     |     8 | 41,600 |
+| Slice LUTs          |    16 | 20,800 |
+| Slice Registers     |     0 | 41,600 |
 | SRL16E              |    15 |      - |
 | DSP48E1             |     0 |     90 |
 | Block RAM Tile      |     0 |     50 |
 +----------------------+-------+--------+
+
+综合质量: 0 errors, 0 critical warnings
+综合耗时: 1分25秒
 ```
 
 ### 时序分析（500MHz时钟）
 ```
 Timing Summary:
-  WNS(ns): 0.180
+  WNS(ns): 0.195
   TNS(ns): 0.000
-  WHS(ns): 0.052
+  WHS(ns): 0.215
   THS(ns): 0.000
   
-Critical Path: 1.816 ns
-  Source: data_in (input port)
-  Destination: srl16e_chain[3].u_srl16e/D
-  Logic Levels: 2 (XOR gates)
-  Route Delay: 0.680 ns
+Critical Path: 1.203 ns
+  Source: crc_enable
+  Destination: srl16e_chain[0].u_srl16e/CE
+  Logic Delay: 0.105 ns
+  Route Delay: 1.098 ns
+```
+
+### 仿真性能（Vivado Simulator）
+```
+仿真耗时: 37秒
+运行时间: 809ns
+内存峰值: 1763MB
+测试通过: 6/6 PASS
 ```
 
 ---

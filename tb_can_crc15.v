@@ -22,6 +22,8 @@ reg data_in;
 reg is_stuffed;
 reg crc_init;
 reg crc_enable;
+reg frame_end;
+reg error_frame;
 wire [14:0] crc_out;
 wire [14:0] crc_out_rev;
 
@@ -40,6 +42,8 @@ can_crc15_core u_dut (
     .is_stuffed(is_stuffed),
     .crc_init(crc_init),
     .crc_enable(crc_enable),
+    .frame_end(frame_end),
+    .error_frame(error_frame),
     .crc_out(crc_out),
     .crc_out_rev(crc_out_rev)
 );
@@ -74,6 +78,8 @@ initial begin
     is_stuffed = 0;
     crc_enable = 1;
     crc_init = 0;
+    frame_end = 0;
+    error_frame = 0;
     
     #20 rst_n = 1;
     #10;
@@ -132,6 +138,17 @@ initial begin
     $display("--------------------------------------------------------------------------------");
     
     test_case_5_alternating();
+    
+    //==========================================================================
+    // 测试案例6：自动复位功能（frame_end触发）
+    //==========================================================================
+    $display("--------------------------------------------------------------------------------");
+    $display("Test Case 6: Auto-Reset on Frame End");
+    $display("  Input: Standard frame, then frame_end signal");
+    $display("  Expected: CRC resets to 0x0000 automatically");
+    $display("--------------------------------------------------------------------------------");
+    
+    test_case_6_auto_reset();
     
     //==========================================================================
     // 测试总结
@@ -426,6 +443,65 @@ task test_case_5_alternating;
             test_passed = test_passed + 1;
         end else begin
             $display("  Result: FAIL ✗");
+            test_failed = test_failed + 1;
+        end
+        
+        $display("");
+    end
+endtask
+
+//==============================================================================
+// 测试案例6：自动复位功能（frame_end触发）
+//==============================================================================
+task test_case_6_auto_reset;
+    reg [14:0] crc_before, crc_after;
+    begin
+        // 复位和初始化
+        @(posedge clk);
+        rst_n = 0;
+        @(posedge clk);
+        rst_n = 1;
+        @(posedge clk);
+        
+        crc_init = 1;
+        @(posedge clk);
+        crc_init = 0;
+        frame_end = 0;
+        error_frame = 0;
+        @(posedge clk);
+        @(posedge clk);
+        @(posedge clk);
+        
+        // 输入一些数据，CRC不再为0
+        feed_bit_sequence(19, 19'b0001001000110000000);
+        
+        @(posedge clk);
+        @(posedge clk);
+        crc_before = crc_out;
+        $display("  CRC before frame_end: 0x%04X", crc_before);
+        
+        // 断言CRC不为0
+        if (crc_before == 15'h0000) begin
+            $display("  ERROR: CRC is zero before test!");
+        end
+        
+        // 触发frame_end，应该自动复位CRC
+        @(posedge clk);
+        frame_end = 1;
+        @(posedge clk);
+        frame_end = 0;
+        
+        @(posedge clk);
+        @(posedge clk);
+        crc_after = crc_out;
+        $display("  CRC after frame_end: 0x%04X", crc_after);
+        
+        // 验证CRC已复位为0
+        if (crc_after == 15'h0000 && crc_before != 15'h0000) begin
+            $display("  Result: PASS ✓ (CRC auto-reset to 0x0000)");
+            test_passed = test_passed + 1;
+        end else begin
+            $display("  Result: FAIL ✗ (CRC did not auto-reset)");
             test_failed = test_failed + 1;
         end
         

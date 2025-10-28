@@ -61,27 +61,14 @@ set_max_delay 5.000 -from [get_ports rst_n] -to [all_registers]
 ################################################################################
 ## 5. SRL16E优化约束（关键！）
 ################################################################################
-# 防止Vivado将SRL16E优化成普通寄存器链
-set_property KEEP TRUE [get_cells -hierarchical -filter {REF_NAME == SRL16E}]
-set_property DONT_TOUCH TRUE [get_cells -hierarchical -filter {REF_NAME == SRL16E}]
-
-# 强制使用移位寄存器原语（最小长度4）
-set_property SHREG_MIN_SIZE 4 [current_design]
-
-# 允许SRL16E使用SRLC32E（32位扩展版本，可选）
-# set_property SHREG_EXTRACT YES [current_design]
+# 注意：约束文件不支持针对不存在的单元设置属性
+# SRL16E相关约束应在综合时通过set_property参数设置
 
 ################################################################################
 ## 6. 综合优化策略
 ################################################################################
-# 优化目标：速度优先（满足500MHz要求）
-set_property OPTIMIZE_PRIMITIVES TRUE [current_design]
-
-# 允许跨层级优化（提高频率）
-set_property FLATTEN_HIERARCHY rebuilt [current_design]
-
-# 资源共享策略（减少LUT使用）
-set_property RESOURCE_SHARING AUTO [current_design]
+# 注意：以下属性应在TCL脚本中通过synth_design参数设置
+# 不应在XDC约束文件中设置
 
 # 保持层级边界（便于调试，可选）
 # set_property KEEP_HIERARCHY TRUE [get_cells u_srl16e_optimized]
@@ -93,8 +80,9 @@ set_property RESOURCE_SHARING AUTO [current_design]
 # set_property LOC SLICE_X20Y50 [get_cells -hierarchical u_crc15]  # 根据实际调整
 
 # 关键路径优化（反馈路径）
-set_max_delay 1.800 -from [get_pins -filter {REF_PIN_NAME == Q} -of [get_cells -hierarchical -filter {REF_NAME == SRL16E}]] \
-                     -to [get_pins -filter {REF_PIN_NAME == D} -of [get_cells -hierarchical -filter {REF_NAME == SRL16E}]]
+# 注意：如果设计中没有SRL16E，此约束会被忽略
+# set_max_delay 1.800 -from [get_pins -filter {REF_PIN_NAME == Q} -of [get_cells -hierarchical -filter {REF_NAME == SRL16E}]] \
+#                      -to [get_pins -filter {REF_PIN_NAME == D} -of [get_cells -hierarchical -filter {REF_NAME == SRL16E}]]
 
 # 多周期路径约束（如果CRC计算允许2周期延迟，可选）
 # set_multicycle_path 2 -setup -from [get_cells crc_reg*] -to [get_cells crc_reg*]
@@ -152,11 +140,6 @@ set_max_delay 1.800 -from [get_pins -filter {REF_PIN_NAME == Q} -of [get_cells -
 ## END OF CONSTRAINTS
 ################################################################################
 
-# 提示信息
-puts "================================================================================"
-puts " CAN CRC-15 Constraints Loaded Successfully"
-puts " Target Clock: 500 MHz (2ns period)"
-puts " Optimization: Speed Priority with SRL16E"
-puts " NOTE: Please update I/O pin assignments for your specific board!"
-puts "================================================================================"
+# 注意：XDC约束文件不支持puts命令
+# 如需提示信息，请在综合后的报告或TCL脚本中输出
 

@@ -38,6 +38,8 @@ module can_crc15_core #(
     // 控制接口
     input  wire         crc_init,      // CRC初始化（高脉冲复位CRC为0x0000）
     input  wire         crc_enable,    // CRC计算使能（低电平时保持CRC状态）
+    input  wire         frame_end,     // 帧结束信号（自动复位CRC）
+    input  wire         error_frame,   // 错误帧信号（自动复位CRC）
     
     // CRC输出
     output wire [14:0]  crc_out,       // 当前CRC值（实时输出）
@@ -103,12 +105,14 @@ assign crc_next[12] = crc_reg[11];                       // 移位
 assign crc_next[13] = crc_reg[12];                       // 移位
 assign crc_next[14] = crc_reg[13] ^ feedback;            // x^14项反馈
 
-// CRC寄存器更新（同步逻辑）
+// CRC寄存器更新（同步逻辑，支持自动复位）
+wire auto_reset = frame_end | error_frame;  // 帧结束或错误帧自动复位
+
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         crc_reg <= 15'h0000;  // 复位为初始值（CAN协议INIT=0x0000）
-    end else if (crc_init) begin
-        crc_reg <= 15'h0000;  // 初始化CRC
+    end else if (auto_reset || crc_init) begin
+        crc_reg <= 15'h0000;  // 自动复位或手动初始化
     end else if (data_valid && crc_enable && !is_stuffed) begin
         // 关键：仅在非填充位时更新CRC（CAN协议要求）
         crc_reg <= crc_next;
@@ -168,6 +172,8 @@ module can_crc15_srl16e_optimized #(
     input  wire         is_stuffed,
     input  wire         crc_init,
     input  wire         crc_enable,
+    input  wire         frame_end,     // 帧结束信号（自动复位CRC）
+    input  wire         error_frame,   // 错误帧信号（自动复位CRC）
     output wire [14:0]  crc_out,
     output wire [14:0]  crc_out_rev
 );
@@ -177,8 +183,11 @@ module can_crc15_srl16e_optimized #(
 wire srl_ce;  // SRL使能信号
 wire [14:0] srl_out;  // SRL输出（并行读取）
 
-// 简化的CRC使能逻辑
-assign srl_ce = data_valid && crc_enable && !is_stuffed;
+// 自动复位逻辑（帧结束或错误帧）
+wire auto_reset_srl = frame_end | error_frame;
+
+// CRC使能逻辑（自动复位时强制移位输入为0）
+assign srl_ce = (data_valid && crc_enable && !is_stuffed) || auto_reset_srl;
 
 // 实例化15个SRL16E原语（每个存储CRC的1位）
 genvar i;
@@ -195,7 +204,7 @@ generate
         SRL16E #(
             .INIT(16'h0000)  // 初始值全0
         ) u_srl16e (
-            .D(crc_next_srl[i]),    // 输入来自CRC计算逻辑
+            .D(auto_reset_srl ? 1'b0 : crc_next_srl[i]),    // 自动复位时输入0
             .CLK(clk),
             .CE(srl_ce),
             .A3(1'b1),              // 地址=15（使用16位深度）
